@@ -112,7 +112,7 @@ def direct_download(item: DriveFile, target: Path) -> bool:
     )
     partial = target.with_name(f".{target.name}.part")
     try:
-        with requests.get(url, stream=True, timeout=(30, 180)) as response:
+        with requests.get(url, stream=True, timeout=(20, 30)) as response:
             response.raise_for_status()
             with partial.open("wb") as stream:
                 for chunk in response.iter_content(1024 * 1024):
