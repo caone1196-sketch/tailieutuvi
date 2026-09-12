@@ -1,0 +1,59 @@
+name: Import Google Drive documents
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - arena/01a095ca-tailieutuvi
+    paths:
+      - .github/workflows/import-google-drive.yml
+      - scripts/import_google_drive.py
+
+permissions:
+  contents: read
+
+concurrency:
+  group: import-google-drive-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  download:
+    name: Download public documents
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install downloader
+        run: python -m pip install "gdown==6.1.1" "beautifulsoup4==4.13.5" "requests==2.32.5"
+
+      - name: Download and verify every PDF
+        run: |
+          python scripts/import_google_drive.py \
+            --folder-id "1-6Tkq1TVugQ9Rsfi3391Odba5BKy730B" \
+            --minimum-files 100
+
+      - name: Show import summary
+        run: |
+          du -sh tai-lieu
+          find tai-lieu -maxdepth 1 -type f -name '*.pdf' | wc -l
+          sed -n '1,12p' DANH_MUC_TAI_LIEU.md
+
+      - name: Package downloaded documents
+        uses: actions/upload-artifact@v4
+        with:
+          name: google-drive-documents
+          path: |
+            tai-lieu/
+            DANH_MUC_TAI_LIEU.md
+            tai-lieu-manifest.tsv
+          compression-level: 0
+          if-no-files-found: error
+          retention-days: 1
