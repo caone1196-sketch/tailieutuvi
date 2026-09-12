@@ -41,12 +41,15 @@ jobs:
             --minimum-files 100
 
       - name: Show import summary
+        if: ${{ always() }}
         run: |
           du -sh tai-lieu
           find tai-lieu -maxdepth 1 -type f -name '*.pdf' | wc -l
           sed -n '1,12p' DANH_MUC_TAI_LIEU.md
+          test ! -f tai-lieu-download-failures.tsv || cat tai-lieu-download-failures.tsv
 
       - name: Package downloaded documents
+        if: ${{ always() }}
         uses: actions/upload-artifact@v4
         with:
           name: google-drive-documents
@@ -54,6 +57,7 @@ jobs:
             tai-lieu/
             DANH_MUC_TAI_LIEU.md
             tai-lieu-manifest.tsv
+            tai-lieu-download-failures.tsv
           compression-level: 0
           if-no-files-found: error
           retention-days: 1

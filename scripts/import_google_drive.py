@@ -104,28 +104,62 @@ def is_pdf(path: Path) -> bool:
         return False
 
 
-def download_one(item: DriveFile, target: Path, attempts: int = 5) -> None:
+def direct_download(item: DriveFile, target: Path) -> bool:
+    """Try Drive's public content endpoint when gdown is rate-limited."""
+    url = (
+        "https://drive.usercontent.google.com/download"
+        f"?id={item.file_id}&export=download&confirm=t"
+    )
+    partial = target.with_name(f".{target.name}.part")
+    try:
+        with requests.get(url, stream=True, timeout=(30, 180)) as response:
+            response.raise_for_status()
+            with partial.open("wb") as stream:
+                for chunk in response.iter_content(1024 * 1024):
+                    if chunk:
+                        stream.write(chunk)
+        if is_pdf(partial):
+            partial.replace(target)
+            return True
+    except (OSError, requests.RequestException) as error:
+        print(f"Direct download error: {error}", file=sys.stderr, flush=True)
+    partial.unlink(missing_ok=True)
+    return False
+
+
+def valid_github_pdf(item: DriveFile, target: Path) -> bool:
+    if not (target.is_file() and target.stat().st_size and is_pdf(target)):
+        return False
+    if target.stat().st_size >= GITHUB_FILE_LIMIT:
+        raise RuntimeError(
+            f"{item.name} is too large for regular GitHub storage "
+            f"({target.stat().st_size} bytes)"
+        )
+    return True
+
+
+def download_one(item: DriveFile, target: Path, attempts: int = 3) -> None:
     for attempt in range(1, attempts + 1):
         print(f"[{attempt}/{attempts}] {item.name}", flush=True)
         try:
-            result = gdown.download(
-                id=item.file_id,
-                output=str(target),
-                quiet=True,
-                use_cookies=True,
-                resume=True,
-            )
-            if result and target.is_file() and target.stat().st_size and is_pdf(target):
-                if target.stat().st_size >= GITHUB_FILE_LIMIT:
-                    raise RuntimeError(
-                        f"{item.name} is too large for regular GitHub storage "
-                        f"({target.stat().st_size} bytes)"
-                    )
+            # gdown handles Google's confirmation page. One attempt is enough;
+            # retries use the lower-level content endpoint to reduce throttling.
+            if attempt == 1:
+                result = gdown.download(
+                    id=item.file_id,
+                    output=str(target),
+                    quiet=True,
+                    use_cookies=True,
+                    resume=True,
+                )
+                if result and valid_github_pdf(item, target):
+                    return
+            if direct_download(item, target) and valid_github_pdf(item, target):
                 return
-        except Exception as error:  # Retry transient Drive failures.
+        except Exception as error:  # Continue after transient Drive failures.
             print(f"Download error: {error}", file=sys.stderr, flush=True)
         if attempt < attempts:
-            time.sleep(min(5 * attempt, 20))
+            time.sleep(min(3 * attempt, 10))
     raise RuntimeError(f"Could not download a valid PDF: {item.name} ({item.file_id})")
 
 
@@ -199,18 +233,54 @@ def main() -> int:
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
     targets = unique_targets(files, args.output_dir)
-    for item, target in targets:
+    failures: list[tuple[DriveFile, str]] = []
+    consecutive_failures = 0
+    for index, (item, target) in enumerate(targets):
         if target.is_file() and is_pdf(target):
             print(f"Skipping existing PDF: {target.name}", flush=True)
+            consecutive_failures = 0
             continue
-        download_one(item, target)
+        try:
+            download_one(item, target)
+            consecutive_failures = 0
+        except RuntimeError as error:
+            print(error, file=sys.stderr, flush=True)
+            failures.append((item, str(error)))
+            consecutive_failures += 1
+            if consecutive_failures >= 5:
+                message = "Not attempted after five consecutive Drive failures"
+                print(message, file=sys.stderr, flush=True)
+                failures.extend(
+                    (remaining_item, message)
+                    for remaining_item, _remaining_target in targets[index + 1 :]
+                )
+                break
 
-    write_indexes(targets, args.folder_id, args.manifest, args.catalogue)
+    downloaded = [
+        (item, target)
+        for item, target in targets
+        if target.is_file() and is_pdf(target)
+    ]
+    write_indexes(downloaded, args.folder_id, args.manifest, args.catalogue)
+
+    failures_path = Path("tai-lieu-download-failures.tsv")
+    if failures:
+        with failures_path.open("w", encoding="utf-8", newline="") as stream:
+            writer = csv.writer(stream, delimiter="\t", lineterminator="\n")
+            writer.writerow(["google_drive_id", "filename", "error"])
+            for item, error in failures:
+                writer.writerow([item.file_id, item.name, error])
+    else:
+        failures_path.unlink(missing_ok=True)
+
     print(
-        f"Finished: {len(targets)} PDFs, "
-        f"{sum(path.stat().st_size for _, path in targets)} bytes",
+        f"Finished: {len(downloaded)}/{len(targets)} PDFs, "
+        f"{sum(path.stat().st_size for _, path in downloaded)} bytes",
         flush=True,
     )
+    if failures:
+        print(f"Failed downloads: {len(failures)}", file=sys.stderr, flush=True)
+        return 2
     return 0
 
 
